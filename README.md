@@ -6,7 +6,7 @@
 [![Platform](https://img.shields.io/badge/Optimizely-%2012-orange.svg?style=flat)](http://world.episerver.com/cms/)
 
 ## Description
-This package consists of an override to the built in "ImageUrlAttribute" that is used to specify preview images for the different content types in your Optimizely project. The only difference is that with this attribute, the images are generated using a configured background color, foreground color and a reference to a FontAwesome icon. The same configured icon can also replace the tree icon in the page tree (feature needs to be explicitly turned on using configuration).
+This package consists of an override to the built in "ImageUrlAttribute" that is used to specify preview images for the different content types in your Optimizely project. The only difference is that with this attribute, the images are generated using a configured background color, foreground color and a reference to a FontAwesome icon. The same configured icon can also replace the tree icon in the page tree (feature needs to be explicitly turned on using configuration). PNG rendering is handled by SkiaSharp.
 
 ![Screenshot of package](/images/fontthumbnail_overview.jpg)
 

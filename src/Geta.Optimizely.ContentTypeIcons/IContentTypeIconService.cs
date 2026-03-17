@@ -1,5 +1,4 @@
 ﻿using Geta.Optimizely.ContentTypeIcons.Settings;
-using SixLabors.ImageSharp;
 
 namespace Geta.Optimizely.ContentTypeIcons
 {
@@ -10,6 +9,6 @@ namespace Geta.Optimizely.ContentTypeIcons
         /// </summary>
         /// <param name="settings">The ContentTypeIconSettings parameter</param>
         /// <returns></returns>
-        Image LoadIconImage(ContentTypeIconSettings settings);
+        byte[] LoadIconImage(ContentTypeIconSettings settings);
     }
 }
