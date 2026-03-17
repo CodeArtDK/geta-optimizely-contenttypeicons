@@ -1,7 +1,5 @@
 using System;
 using System.IO;
-using System.Linq;
-using System.Numerics;
 using EPiServer.Framework.Internal;
 using EPiServer.Shell;
 using Geta.Optimizely.ContentTypeIcons.Infrastructure.Configuration;
@@ -9,12 +7,7 @@ using Geta.Optimizely.ContentTypeIcons.Settings;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Options;
-using SixLabors.Fonts;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.Drawing.Processing;
-using SixLabors.ImageSharp.Formats.Png;
-using SixLabors.ImageSharp.PixelFormats;
-using SixLabors.ImageSharp.Processing;
+using SkiaSharp;
 
 namespace Geta.Optimizely.ContentTypeIcons
 {
@@ -42,116 +35,104 @@ namespace Geta.Optimizely.ContentTypeIcons
         /// </summary>
         /// <param name="settings">The ContentTypeIconSettings parameter</param>
         /// <returns></returns>
-        public virtual Image LoadIconImage(ContentTypeIconSettings settings)
+        public virtual byte[] LoadIconImage(ContentTypeIconSettings settings)
         {
+            if (settings == null)
+            {
+                throw new ArgumentNullException(nameof(settings));
+            }
+
             var fileName = settings.GetFileName(".png");
             var cachePath = GetFileFullPath(fileName);
 
             if (File.Exists(cachePath))
             {
-                return Image.Load(cachePath);
+                return File.ReadAllBytes(cachePath);
             }
 
-            using var stream = GenerateImage(settings);
-            using var fileStream = File.Create(cachePath);
-            using var img = Image.Load(stream);
-
-            img.Save(fileStream, new PngEncoder());
-
-            return img.Clone(_ => { });
+            var image = GenerateImage(settings);
+            File.WriteAllBytes(cachePath, image);
+            return image;
         }
 
-        protected virtual MemoryStream GenerateImage(ContentTypeIconSettings settings)
+        protected virtual byte[] GenerateImage(ContentTypeIconSettings settings)
         {
-            var family = settings.UseEmbeddedFont
-                ? LoadFontFamilyFromClientResources(settings.EmbeddedFont)
-                : LoadFontFamilyFromDisk(settings.CustomFontName);
+            using var typeface = settings.UseEmbeddedFont
+                ? LoadEmbeddedTypeface(settings.EmbeddedFont)
+                : LoadTypefaceFromDisk(settings.CustomFontName);
 
-            var font = family.CreateFont(settings.FontSize);
-
-            using var image = new Image<Rgb24>(settings.Width, settings.Height);
-
-            var center = new Vector2((float)image.Width / 2, (float)image.Height / 2);
-
-            var textOptions = new RichTextOptions(font)
+            if (!HtmlColorParser.TryParse(settings.BackgroundColor, out var background))
             {
-                VerticalAlignment = VerticalAlignment.Center,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                Origin = center
+                throw new InvalidOperationException($"Unable to parse background color '{settings.BackgroundColor}'.");
+            }
+
+            if (!HtmlColorParser.TryParse(settings.ForegroundColor, out var foreground))
+            {
+                throw new InvalidOperationException($"Unable to parse foreground color '{settings.ForegroundColor}'.");
+            }
+
+            using var image = new SKBitmap(settings.Width, settings.Height, SKColorType.Bgra8888, SKAlphaType.Premul);
+            using var canvas = new SKCanvas(image);
+            canvas.Clear(background);
+
+            using var paint = new SKPaint
+            {
+                Color = foreground,
+                IsAntialias = true,
+                TextAlign = SKTextAlign.Center,
+                TextSize = settings.FontSize,
+                Typeface = typeface
             };
 
+            canvas.Save();
+            ApplyTransformation(canvas, settings);
+
+            var metrics = paint.FontMetrics;
+            var x = settings.Width / 2f;
+            var y = settings.Height / 2f - ((metrics.Ascent + metrics.Descent) / 2f);
             var character = char.ConvertFromUtf32(settings.Character);
+            canvas.DrawText(character, x, y, paint);
+            canvas.Restore();
 
-            var background = Color.Parse(settings.BackgroundColor);
-            var foreground = Color.Parse(settings.ForegroundColor);
-
-            image.Mutate(i => i.Fill(background));
-            image.Mutate(i => i.DrawText(textOptions, character, foreground));
-
-            switch (settings.Rotate)
+            using var renderedImage = SKImage.FromBitmap(image);
+            using var data = renderedImage.Encode(SKEncodedImageFormat.Png, 100);
+            if (data == null)
             {
-                case Rotations.Rotate90:
-                case Rotations.Rotate180:
-                case Rotations.Rotate270:
-                    image.Mutate(i => i.Rotate((float)settings.Rotate));
-                    break;
-                case Rotations.FlipHorizontal:
-                    image.Mutate(i => i.Flip(FlipMode.Horizontal));
-                    break;
-                case Rotations.FlipVertical:
-                    image.Mutate(i => i.Flip(FlipMode.Vertical));
-                    break;
+                throw new InvalidOperationException("Unable to encode icon image as PNG.");
             }
 
-            var stream = new MemoryStream();
-
-            image.Save(stream, new PngEncoder());
-
-            stream.Position = 0;
-
-            return stream;
+            return data.ToArray();
         }
 
-        protected virtual FontFamily LoadFontFamilyFromClientResources(string fileName)
+        protected virtual SKTypeface LoadEmbeddedTypeface(string fileName)
         {
-            var cacheKey = $"geta.fontawesome.embedded.fontcollection.{fileName}";
-            _cache.TryGetValue(cacheKey, out FontCollection fontCollection);
-
-            if (fontCollection != null)
+            var cacheKey = $"geta.fontawesome.embedded.typeface.{fileName}";
+            if (_cache.TryGetValue(cacheKey, out byte[] fontData) && fontData != null)
             {
-                return fontCollection.Families.First();
+                return CreateTypeface(fontData, fileName);
             }
 
             try
             {
                 var path = Paths.ToClientResource(Constants.ModuleName, $"ClientResources/{fileName}");
-
-                fontCollection = new FontCollection();
-
                 var file = _fileProvider.GetFileInfo(path);
                 using var fontStream = file.CreateReadStream();
-                fontCollection.Add(fontStream);
+                using var memoryStream = new MemoryStream();
+                fontStream.CopyTo(memoryStream);
+                fontData = memoryStream.ToArray();
 
-                _cache.Set(cacheKey, fontCollection, DateTimeOffset.Now.AddMinutes(5));
+                _cache.Set(cacheKey, fontData, DateTimeOffset.Now.AddMinutes(5));
             }
             catch (Exception ex)
             {
                 throw new InvalidOperationException($"Unable to load font {fileName} from EmbeddedResource", ex);
             }
 
-            return fontCollection.Families.First();
+            return CreateTypeface(fontData, fileName);
         }
 
-        protected virtual FontFamily LoadFontFamilyFromDisk(string fileName)
+        protected virtual SKTypeface LoadTypefaceFromDisk(string fileName)
         {
-            var cacheKey = $"geta.fontawesome.disk.fontcollection.{fileName}";
-            _cache.TryGetValue(cacheKey, out FontCollection fontCollection);
-
-            if (fontCollection != null)
-            {
-                return fontCollection.Families.First();
-            }
-
             var customFontFolder = _configuration.CustomFontPath;
             var fontPath = $"{customFontFolder}{fileName}";
 
@@ -159,22 +140,61 @@ namespace Geta.Optimizely.ContentTypeIcons
 
             try
             {
-                fontCollection = new FontCollection();
-                fontCollection.Add(rebased);
-                _cache.Set(cacheKey, fontCollection, DateTimeOffset.Now.AddMinutes(5));
+                var typeface = SKTypeface.FromFile(rebased);
+                if (typeface == null)
+                {
+                    throw new InvalidOperationException($"Unable to create typeface from path {rebased}");
+                }
+
+                return typeface;
             }
             catch (Exception ex)
             {
                 throw new InvalidOperationException($"Unable to load custom font from path {fontPath}", ex);
             }
-
-            return fontCollection.Families.First();
         }
 
         protected virtual string GetFileFullPath(string fileName)
         {
             var rootPath = _configuration.CachePath;
             return _physicalPathResolver.Rebase(rootPath + fileName);
+        }
+
+        private static SKTypeface CreateTypeface(byte[] fontData, string fileName)
+        {
+            var typeface = SKTypeface.FromStream(new MemoryStream(fontData, writable: false));
+
+            if (typeface == null)
+            {
+                throw new InvalidOperationException($"Unable to create typeface from font {fileName}");
+            }
+
+            return typeface;
+        }
+
+        private static void ApplyTransformation(SKCanvas canvas, ContentTypeIconSettings settings)
+        {
+            var centerX = settings.Width / 2f;
+            var centerY = settings.Height / 2f;
+
+            canvas.Translate(centerX, centerY);
+
+            switch (settings.Rotate)
+            {
+                case Rotations.Rotate90:
+                case Rotations.Rotate180:
+                case Rotations.Rotate270:
+                    canvas.RotateDegrees((float)settings.Rotate);
+                    break;
+                case Rotations.FlipHorizontal:
+                    canvas.Scale(-1f, 1f);
+                    break;
+                case Rotations.FlipVertical:
+                    canvas.Scale(1f, -1f);
+                    break;
+            }
+
+            canvas.Translate(-centerX, -centerY);
         }
     }
 }
